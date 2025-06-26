@@ -7,8 +7,8 @@ if (process.env.AWS_ACCESS_KEY_ID && process.env.AWS_SECRET_ACCESS_KEY) {
 } else {
   console.log('⚠️ No se encontraron credenciales en variables de entorno');
   console.log('💡 Configura las variables:');
-  console.log('   $env:AWS_ACCESS_KEY_ID = "AKIAYMX4X46WIMLMTG4U"');
-  console.log('   $env:AWS_SECRET_ACCESS_KEY = "fq3crW8MhPP6SA84e5lxWcPJC68prJvKlObVpe65"');
+    console.log('   $env:AWS_ACCESS_KEY_ID = "YOUR_ACCESS_KEY_HERE"');
+  console.log('   $env:AWS_SECRET_ACCESS_KEY = "YOUR_SECRET_ACCESS_KEY_HERE"');
   console.log('   $env:AWS_DEFAULT_REGION = "us-east-1"');
   console.log('');
   
