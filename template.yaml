@@ -1,0 +1,370 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: 'Migrador DMS - Sistema de migración y monitoreo para AWS DMS'
+
+Parameters:
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, staging, prod]
+    Description: Ambiente de despliegue
+    
+  NotificationEmail:
+    Type: String
+    Default: admin@example.com
+    Description: Email para recibir notificaciones
+    
+  DmsTaskArn:
+    Type: String
+    Default: ''
+    Description: ARN de la tarea DMS a gestionar
+
+Globals:
+  Function:
+    Runtime: nodejs18.x
+    Timeout: 300
+    MemorySize: 512
+    Environment:
+      Variables:
+        ENVIRONMENT: !Ref Environment
+        SNS_TOPIC_ARN: !Ref MigrationNotificationTopic
+        DMS_EXECUTION_ROLE_ARN: !GetAtt DMSExecutionRole.Arn
+
+Resources:
+  # ===== FUNCIONES LAMBDA =====
+  ValidateFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub '${AWS::StackName}-validate'
+      CodeUri: lambda-functions/
+      Handler: validate.handler
+      Description: 'Valida configuración antes de migración DMS'
+      Timeout: 300
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref ConfigurationTable
+        - Statement:
+          - Effect: Allow
+            Action:
+              - dms:DescribeReplicationTasks
+              - dms:DescribeEndpoints
+              - sts:GetCallerIdentity
+            Resource: '*'
+
+  MigrateFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub '${AWS::StackName}-migrate'
+      CodeUri: lambda-functions/
+      Handler: migrate.handler
+      Description: 'Inicia tarea de migración DMS'
+      Timeout: 600
+      Policies:
+        - Statement:
+          - Effect: Allow
+            Action:
+              - dms:StartReplicationTask
+              - dms:StopReplicationTask
+              - dms:ModifyReplicationTask
+              - dms:DescribeReplicationTasks
+            Resource: '*'
+          - Effect: Allow
+            Action:
+              - sns:Publish
+            Resource: !Ref MigrationNotificationTopic
+
+  MonitorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub '${AWS::StackName}-monitor'
+      CodeUri: lambda-functions/
+      Handler: monitor.handler
+      Description: 'Monitorea progreso de migración DMS'
+      Timeout: 300
+      Events:
+        ScheduledMonitoring:
+          Type: Schedule
+          Properties:
+            Schedule: rate(5 minutes)
+            Input: !Sub |
+              {
+                "taskArn": "${DmsTaskArn}",
+                "environment": "${Environment}"
+              }
+            Enabled: false
+      Policies:
+        - Statement:
+          - Effect: Allow
+            Action:
+              - dms:DescribeReplicationTasks
+              - dms:DescribeReplicationTaskAssessmentResults
+            Resource: '*'
+          - Effect: Allow
+            Action:
+              - sns:Publish
+            Resource: !Ref MigrationNotificationTopic
+          - Effect: Allow
+            Action:
+              - dynamodb:PutItem
+              - dynamodb:GetItem
+              - dynamodb:UpdateItem
+            Resource: !GetAtt MonitoringTable.Arn
+
+  OrchestratorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub '${AWS::StackName}-orchestrator'
+      CodeUri: lambda-functions/
+      Handler: orchestrator.handler
+      Description: 'Orquesta el proceso completo de migración'
+      Timeout: 900
+      Events:
+        ApiTrigger:
+          Type: Api
+          Properties:
+            Path: /migrate
+            Method: post
+            RestApiId: !Ref MigrationApi
+        ScheduledMigration:
+          Type: Schedule
+          Properties:
+            Schedule: cron(0 2 * * ? *)  # 2 AM diario
+            Input: !Sub |
+              {
+                "source": "scheduled",
+                "environment": "${Environment}"
+              }
+            Enabled: false
+      Environment:
+        Variables:
+          VALIDATE_FUNCTION_NAME: !Ref ValidateFunction
+          MIGRATE_FUNCTION_NAME: !Ref MigrateFunction
+          MONITOR_FUNCTION_NAME: !Ref MonitorFunction
+          STATE_MACHINE_ARN: !Ref MigrationStateMachine
+      Policies:
+        - Statement:
+          - Effect: Allow
+            Action:
+              - lambda:InvokeFunction
+            Resource: 
+              - !GetAtt ValidateFunction.Arn
+              - !GetAtt MigrateFunction.Arn
+              - !GetAtt MonitorFunction.Arn
+          - Effect: Allow
+            Action:
+              - states:StartExecution
+              - states:DescribeExecution
+            Resource: !Ref MigrationStateMachine
+
+  # ===== API GATEWAY =====
+  MigrationApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      Name: !Sub '${AWS::StackName}-api'
+      StageName: !Ref Environment
+      Cors:
+        AllowMethods: "'GET,POST,OPTIONS'"
+        AllowHeaders: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+        AllowOrigin: "'*'"
+      Auth:
+        ApiKeyRequired: true
+        UsagePlan:
+          CreateUsagePlan: PER_API
+          Description: Plan de uso para API de migración
+          Quota:
+            Limit: 1000
+            Period: DAY
+          Throttle:
+            BurstLimit: 10
+            RateLimit: 5
+
+  # ===== STEP FUNCTIONS =====
+  MigrationStateMachine:
+    Type: AWS::Serverless::StateMachine
+    Properties:
+      Name: !Sub '${AWS::StackName}-migration-workflow'
+      DefinitionUri: step-functions/migration-workflow.json
+      DefinitionSubstitutions:
+        ValidateFunctionArn: !GetAtt ValidateFunction.Arn
+        MigrateFunctionArn: !GetAtt MigrateFunction.Arn
+        MonitorFunctionArn: !GetAtt MonitorFunction.Arn
+        NotificationTopicArn: !Ref MigrationNotificationTopic
+      Policies:
+        - LambdaInvokePolicy:
+            FunctionName: !Ref ValidateFunction
+        - LambdaInvokePolicy:
+            FunctionName: !Ref MigrateFunction
+        - LambdaInvokePolicy:
+            FunctionName: !Ref MonitorFunction
+        - Statement:
+          - Effect: Allow
+            Action:
+              - sns:Publish
+            Resource: !Ref MigrationNotificationTopic
+
+  # ===== SNS TOPIC =====
+  MigrationNotificationTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub '${AWS::StackName}-notifications'
+      DisplayName: 'Notificaciones Migración DMS'
+
+  EmailSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      Protocol: email
+      TopicArn: !Ref MigrationNotificationTopic
+      Endpoint: !Ref NotificationEmail
+
+  # ===== DYNAMODB TABLES =====
+  ConfigurationTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub '${AWS::StackName}-configuration'
+      AttributeDefinitions:
+        - AttributeName: configId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: configId
+          KeyType: HASH
+      BillingMode: PAY_PER_REQUEST
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Purpose
+          Value: DMS Migration Configuration
+
+  MonitoringTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub '${AWS::StackName}-monitoring'
+      AttributeDefinitions:
+        - AttributeName: taskArn
+          AttributeType: S
+        - AttributeName: timestamp
+          AttributeType: S
+      KeySchema:
+        - AttributeName: taskArn
+          KeyType: HASH
+        - AttributeName: timestamp
+          KeyType: RANGE
+      BillingMode: PAY_PER_REQUEST
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Purpose
+          Value: DMS Migration Monitoring
+
+  # ===== IAM ROLES =====
+  DMSExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${AWS::StackName}-dms-execution-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: dms.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonDMSVPCManagementRole
+        - arn:aws:iam::aws:policy/service-role/AmazonDMSCloudWatchLogsRole
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+
+  # ===== CLOUDWATCH =====
+  MigrationLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${AWS::StackName}'
+      RetentionInDays: 14
+
+  MigrationDashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Properties:
+      DashboardName: !Sub '${AWS::StackName}-migration-dashboard'
+      DashboardBody: !Sub |
+        {
+          "widgets": [
+            {
+              "type": "metric",
+              "x": 0,
+              "y": 0,
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "metrics": [
+                  [ "AWS/Lambda", "Duration", "FunctionName", "${OrchestratorFunction}" ],
+                  [ ".", "Errors", ".", "." ],
+                  [ ".", "Invocations", ".", "." ]
+                ],
+                "period": 300,
+                "stat": "Average",
+                "region": "${AWS::Region}",
+                "title": "Lambda Orchestrator Metrics"
+              }
+            },
+            {
+              "type": "log",
+              "x": 0,
+              "y": 6,
+              "width": 24,
+              "height": 6,
+              "properties": {
+                "query": "SOURCE '/aws/lambda/${AWS::StackName}'\n| fields @timestamp, @message\n| sort @timestamp desc\n| limit 100",
+                "region": "${AWS::Region}",
+                "title": "Recent Migration Logs"
+              }
+            }
+          ]
+        }
+
+Outputs:
+  ApiUrl:
+    Description: 'URL base de la API de migración'
+    Value: !Sub 'https://${MigrationApi}.execute-api.${AWS::Region}.amazonaws.com/${Environment}'
+    Export:
+      Name: !Sub '${AWS::StackName}-api-url'
+
+  ApiKey:
+    Description: 'API Key para autenticación'
+    Value: !Ref MigrationApiApiKey
+    Export:
+      Name: !Sub '${AWS::StackName}-api-key'
+
+  NotificationTopicArn:
+    Description: 'ARN del topic SNS para notificaciones'
+    Value: !Ref MigrationNotificationTopic
+    Export:
+      Name: !Sub '${AWS::StackName}-notification-topic'
+
+  StateMachineArn:
+    Description: 'ARN de la State Machine'
+    Value: !Ref MigrationStateMachine
+    Export:
+      Name: !Sub '${AWS::StackName}-state-machine'
+
+  ConfigurationTableName:
+    Description: 'Nombre de la tabla de configuración'
+    Value: !Ref ConfigurationTable
+    Export:
+      Name: !Sub '${AWS::StackName}-config-table'
+
+  MonitoringTableName:
+    Description: 'Nombre de la tabla de monitoreo'
+    Value: !Ref MonitoringTable
+    Export:
+      Name: !Sub '${AWS::StackName}-monitoring-table'
+
+  DashboardUrl:
+    Description: 'URL del dashboard de CloudWatch'
+    Value: !Sub 'https://${AWS::Region}.console.aws.amazon.com/cloudwatch/home?region=${AWS::Region}#dashboards:name=${AWS::StackName}-migration-dashboard'
+    Export:
+      Name: !Sub '${AWS::StackName}-dashboard-url'

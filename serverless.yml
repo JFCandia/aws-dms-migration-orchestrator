@@ -1,0 +1,247 @@
+service: migrador-dms
+frameworkVersion: '3'
+
+provider:
+  name: aws
+  runtime: nodejs18.x
+  region: ${opt:region, 'us-east-1'}
+  stage: ${opt:stage, 'dev'}
+  memorySize: 512
+  timeout: 900
+  
+  environment:
+    STAGE: ${self:provider.stage}
+    REGION: ${self:provider.region}
+    SNS_TOPIC_ARN: !Ref MigrationNotificationTopic
+    DMS_EXECUTION_ROLE_ARN: !GetAtt DMSExecutionRole.Arn
+    
+  iam:
+    role:
+      statements:
+        - Effect: Allow
+          Action:
+            - dms:*
+            - sns:Publish
+            - logs:CreateLogGroup
+            - logs:CreateLogStream
+            - logs:PutLogEvents
+            - stepfunctions:StartExecution
+            - stepfunctions:DescribeExecution
+          Resource: "*"
+        - Effect: Allow
+          Action:
+            - lambda:InvokeFunction
+          Resource: 
+            - !GetAtt ValidateLambdaFunction.Arn
+            - !GetAtt MigrateLambdaFunction.Arn
+            - !GetAtt MonitorLambdaFunction.Arn
+
+functions:
+  orchestrator:
+    handler: lambda-functions/orchestrator.handler
+    description: Orquesta el proceso completo de migración DMS
+    events:
+      - schedule:
+          rate: cron(0 2 * * ? *)  # Ejecutar diariamente a las 2 AM
+          enabled: false
+      - http:
+          path: /migrate
+          method: post
+          cors: true
+    environment:
+      VALIDATE_FUNCTION_NAME: ${self:service}-${self:provider.stage}-validate
+      MIGRATE_FUNCTION_NAME: ${self:service}-${self:provider.stage}-migrate
+      MONITOR_FUNCTION_NAME: ${self:service}-${self:provider.stage}-monitor
+
+  validate:
+    handler: lambda-functions/validate.handler
+    description: Valida la configuración antes de iniciar la migración
+    timeout: 300
+    
+  migrate:
+    handler: lambda-functions/migrate.handler
+    description: Inicia la tarea de migración DMS
+    timeout: 600
+    
+  monitor:
+    handler: lambda-functions/monitor.handler
+    description: Monitorea el progreso de la migración DMS
+    timeout: 300
+    events:
+      - schedule:
+          rate: rate(5 minutes)
+          enabled: false
+          input:
+            taskArn: "${env:DMS_TASK_ARN, ''}"
+
+plugins:
+  - serverless-offline
+  - serverless-step-functions
+
+resources:
+  Resources:
+    # SNS Topic para notificaciones
+    MigrationNotificationTopic:
+      Type: AWS::SNS::Topic
+      Properties:
+        TopicName: ${self:service}-${self:provider.stage}-notifications
+        DisplayName: "Notificaciones de Migración DMS"
+        
+    # Suscripción por email (opcional)
+    EmailSubscription:
+      Type: AWS::SNS::Subscription
+      Properties:
+        Protocol: email
+        TopicArn: !Ref MigrationNotificationTopic
+        Endpoint: ${env:NOTIFICATION_EMAIL, 'admin@example.com'}
+        
+    # Rol de ejecución para DMS
+    DMSExecutionRole:
+      Type: AWS::IAM::Role
+      Properties:
+        RoleName: ${self:service}-${self:provider.stage}-dms-role
+        AssumeRolePolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Principal:
+                Service: dms.amazonaws.com
+              Action: sts:AssumeRole
+        ManagedPolicyArns:
+          - arn:aws:iam::aws:policy/service-role/AmazonDMSVPCManagementRole
+          - arn:aws:iam::aws:policy/service-role/AmazonDMSCloudWatchLogsRole
+          
+    # State Machine para orquestación avanzada
+    MigrationStateMachine:
+      Type: AWS::StepFunctions::StateMachine
+      Properties:
+        StateMachineName: ${self:service}-${self:provider.stage}-migration
+        DefinitionString: !Sub |
+          {
+            "Comment": "Orquestación de migración DMS",
+            "StartAt": "ValidateConfiguration",
+            "States": {
+              "ValidateConfiguration": {
+                "Type": "Task",
+                "Resource": "${ValidateLambdaFunction.Arn}",
+                "Next": "StartMigration",
+                "Catch": [
+                  {
+                    "ErrorEquals": ["States.ALL"],
+                    "Next": "NotifyFailure"
+                  }
+                ]
+              },
+              "StartMigration": {
+                "Type": "Task",
+                "Resource": "${MigrateLambdaFunction.Arn}",
+                "Next": "MonitorMigration",
+                "Catch": [
+                  {
+                    "ErrorEquals": ["States.ALL"],
+                    "Next": "NotifyFailure"
+                  }
+                ]
+              },
+              "MonitorMigration": {
+                "Type": "Task",
+                "Resource": "${MonitorLambdaFunction.Arn}",
+                "Next": "CheckStatus",
+                "Retry": [
+                  {
+                    "ErrorEquals": ["States.TaskFailed"],
+                    "IntervalSeconds": 30,
+                    "MaxAttempts": 3,
+                    "BackoffRate": 2.0
+                  }
+                ]
+              },
+              "CheckStatus": {
+                "Type": "Choice",
+                "Choices": [
+                  {
+                    "Variable": "$.status",
+                    "StringEquals": "completed",
+                    "Next": "NotifySuccess"
+                  },
+                  {
+                    "Variable": "$.status",
+                    "StringEquals": "running",
+                    "Next": "WaitForCompletion"
+                  }
+                ],
+                "Default": "NotifyFailure"
+              },
+              "WaitForCompletion": {
+                "Type": "Wait",
+                "Seconds": 300,
+                "Next": "MonitorMigration"
+              },
+              "NotifySuccess": {
+                "Type": "Task",
+                "Resource": "arn:aws:states:::sns:publish",
+                "Parameters": {
+                  "TopicArn": "${MigrationNotificationTopic}",
+                  "Message": "Migración DMS completada exitosamente",
+                  "Subject": "✅ Migración DMS - Éxito"
+                },
+                "End": true
+              },
+              "NotifyFailure": {
+                "Type": "Task",
+                "Resource": "arn:aws:states:::sns:publish",
+                "Parameters": {
+                  "TopicArn": "${MigrationNotificationTopic}",
+                  "Message": "Error en la migración DMS",
+                  "Subject": "❌ Migración DMS - Error"
+                },
+                "End": true
+              }
+            }
+          }
+        RoleArn: !GetAtt StepFunctionRole.Arn
+        
+    # Rol para Step Functions
+    StepFunctionRole:
+      Type: AWS::IAM::Role
+      Properties:
+        AssumeRolePolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Principal:
+                Service: states.amazonaws.com
+              Action: sts:AssumeRole
+        Policies:
+          - PolicyName: StepFunctionExecutionPolicy
+            PolicyDocument:
+              Version: '2012-10-17'
+              Statement:
+                - Effect: Allow
+                  Action:
+                    - lambda:InvokeFunction
+                    - sns:Publish
+                  Resource: "*"
+
+  Outputs:
+    MigrationApiUrl:
+      Description: "URL de la API para iniciar migraciones"
+      Value: !Sub "https://${ApiGatewayRestApi}.execute-api.${AWS::Region}.amazonaws.com/${self:provider.stage}/migrate"
+      
+    NotificationTopicArn:
+      Description: "ARN del topic SNS para notificaciones"
+      Value: !Ref MigrationNotificationTopic
+      
+    StateMachineArn:
+      Description: "ARN de la State Machine de Step Functions"
+      Value: !Ref MigrationStateMachine
+
+custom:
+  serverless-offline:
+    httpPort: 3000
+    
+stepFunctions:
+  stateMachines:
+    migrationOrchestrator:
+      name: ${self:service}-${self:provider.stage}-migration
+      definition: ${file(step-functions/migration-workflow.json)}

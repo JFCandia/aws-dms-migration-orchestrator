@@ -1,0 +1,110 @@
+{
+  "name": "migrador-dms",
+  "version": "1.0.0",
+  "description": "Sistema de migración y monitoreo para AWS DMS con orquestación avanzada",
+  "main": "iniciar-migracion.js",
+  "scripts": {
+    "start": "node iniciar-migracion.js",
+    "test": "npm run test:unit && npm run test:integration",
+    "test:unit": "jest --testPathPattern=test/ --coverage",
+    "test:integration": "jest --testPathPattern=integration-tests/",
+    "test:simulation": "node test-lambdas-simulacion.js",
+    "test:orchestrator": "node test-orchestrator.js",
+    "lint": "eslint lambda-functions/ iniciar-migracion.js",
+    "lint:fix": "eslint lambda-functions/ iniciar-migracion.js --fix",
+    "build": "npm install && npm run lint",
+    "deploy:sam": "sam build && sam deploy",
+    "deploy:serverless": "serverless deploy",
+    "deploy:dev": "serverless deploy --stage dev",
+    "deploy:prod": "serverless deploy --stage prod",
+    "local:api": "sam local start-api",
+    "local:lambda": "sam local start-lambda",
+    "local:serverless": "serverless offline start",
+    "logs:orchestrator": "sam logs -n OrchestratorFunction --tail",
+    "logs:validate": "sam logs -n ValidateFunction --tail",
+    "logs:migrate": "sam logs -n MigrateFunction --tail",
+    "logs:monitor": "sam logs -n MonitorFunction --tail",
+    "invoke:validate": "sam local invoke ValidateFunction --event events/validate-event.json",
+    "invoke:migrate": "sam local invoke MigrateFunction --event events/migrate-event.json",
+    "invoke:monitor": "sam local invoke MonitorFunction --event events/monitor-event.json",
+    "invoke:orchestrator": "sam local invoke OrchestratorFunction --event events/orchestrator-event.json",
+    "clean": "rm -rf .aws-sam/ node_modules/ coverage/ *.zip",
+    "package": "zip -r lambda-functions.zip lambda-functions/ package.json",
+    "validate:sam": "sam validate --template template.yaml",
+    "validate:serverless": "serverless print",
+    "setup:env": "cp .env.example .env",
+    "docs": "jsdoc lambda-functions/ -d docs/",
+    "security:audit": "npm audit",
+    "security:fix": "npm audit fix"
+  },
+  "keywords": [
+    "aws",
+    "dms",
+    "migration",
+    "database",
+    "lambda",
+    "serverless",
+    "monitoring",
+    "orchestration"
+  ],
+  "author": "Jorge Candia <jcandia.sbad@gmail.com>",
+  "license": "MIT",
+  "type": "commonjs",
+  "engines": {
+    "node": ">=18.0.0",
+    "npm": ">=8.0.0"
+  },
+  "dependencies": {
+    "aws-sdk": "^2.1692.0"
+  },
+  "devDependencies": {
+    "jest": "^29.7.0",
+    "eslint": "^8.57.0",
+    "eslint-config-standard": "^17.1.0",
+    "eslint-plugin-import": "^2.29.1",
+    "eslint-plugin-node": "^11.1.0",
+    "eslint-plugin-promise": "^6.1.1",
+    "aws-sdk-mock": "^5.8.0",
+    "serverless": "^3.38.0",
+    "serverless-offline": "^13.3.0",
+    "serverless-step-functions": "^3.21.0",
+    "@aws-sam/cli": "^1.102.0",
+    "jsdoc": "^4.0.2"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/jcandia-sbad/migrador-dms.git"
+  },
+  "bugs": {
+    "url": "https://github.com/jcandia-sbad/migrador-dms/issues"
+  },
+  "homepage": "https://github.com/jcandia-sbad/migrador-dms#readme",
+  "jest": {
+    "testEnvironment": "node",
+    "collectCoverageFrom": [
+      "lambda-functions/**/*.js",
+      "iniciar-migracion.js",
+      "!**/node_modules/**"
+    ],
+    "coverageDirectory": "coverage",
+    "coverageReporters": [
+      "text",
+      "lcov",
+      "html"
+    ]
+  },
+  "eslintConfig": {
+    "extends": [
+      "standard"
+    ],
+    "env": {
+      "node": true,
+      "jest": true
+    },
+    "rules": {
+      "no-console": "off",
+      "prefer-const": "error",
+      "no-unused-vars": "error"
+    }
+  }
+}
