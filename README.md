@@ -512,10 +512,9 @@ Este proyecto fue desarrollado como demostración de habilidades en:
 
 ## 📞 Contacto
 
-- **Desarrollador**: Jorge Candia
-- **Email**: jcandia.sbad@gmail.com
-- **LinkedIn**: [linkedin.com/in/jorge-candia](https://linkedin.com/in/jorge-candia)
-- **GitHub**: [github.com/jcandia-sbad](https://github.com/jcandia-sbad)
+- **Desarrollador**: Juan Francisco Candia
+- **Email**: candia1978@gmail.com
+- **GitHub**: [https://github.com/JFCandia/aws-dms-migration-orchestrator/edit/main/README.md
 
 ---
 
