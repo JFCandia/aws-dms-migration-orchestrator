@@ -514,7 +514,7 @@ Este proyecto fue desarrollado como demostración de habilidades en:
 
 - **Desarrollador**: Juan Francisco Candia
 - **Email**: candia1978@gmail.com
-- **GitHub**: [https://github.com/JFCandia/aws-dms-migration-orchestrator/edit/main/README.md
+**GitHub**:https://github.com/JFCandia/aws-dms-migration-orchestrator/
 
 ---
 
